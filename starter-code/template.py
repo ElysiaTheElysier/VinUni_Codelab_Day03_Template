@@ -9,6 +9,12 @@ import sys
 from typing import Dict, Any, Tuple
 from tools import TOOL_DEFINITIONS, TOOL_MAP, get_flight_info, get_weather_forecast
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 if hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -37,21 +43,35 @@ class ChatbotBaseline:
             try:
                 import google.generativeai as genai
                 genai.configure(api_key=self.api_key)
-                model = genai.GenerativeModel('gemini-1.5-flash')
-                response = model.generate_content(
-                    f"Bạn là chatbot tư vấn du lịch. Hãy trả lời câu hỏi sau một cách tự nhiên KHÔNG dùng tool hay internet: {user_input}"
-                )
-                return {
-                    "answer": response.text,
-                    "tool_calls": [],
-                    "status": "success",
-                    "mode": "live_api"
-                }
+                for model_name in ['gemini-3.6-flash', 'gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-1.5-flash']:
+                    try:
+                        model = genai.GenerativeModel(model_name)
+                        response = model.generate_content(
+                            f"Bạn là chatbot tư vấn du lịch. Hãy trả lời câu hỏi sau một cách tự nhiên KHÔNG dùng tool hay internet: {user_input}"
+                        )
+                        return {
+                            "answer": response.text,
+                            "tool_calls": [],
+                            "status": "success",
+                            "mode": "live_api"
+                        }
+                    except Exception:
+                        continue
             except Exception:
                 pass
 
+        user_lower = user_input.lower()
+        if any(g in user_lower for g in ["hi", "hello", "chào", "bạn là ai"]):
+            answer = "Xin chào! Tôi là Chatbot tư vấn du lịch cơ bản (Baseline). Tôi có thể trò chuyện chung với bạn, nhưng tôi không có quyền truy cập cơ sở dữ liệu thời gian thực để tra cứu vé máy bay hay thời tiết chính xác."
+        elif any(k in user_lower for k in ["chuyến bay", "vé"]):
+            answer = "Bạn có thể tìm chuyến bay trên các trang hàng không. Tôi không thể tra cứu giá vé và chuyến bay theo thời gian thực."
+        elif any(k in user_lower for k in ["thời tiết", "nhiệt độ", "mặc gì"]):
+            answer = "Về thời tiết, bạn nên tra cứu trên trang dự báo thời tiết uy tín. Tôi không có dữ liệu khí tượng trực tiếp."
+        else:
+            answer = "Bạn có thể tìm chuyến bay trên các trang hàng không. Về thời tiết, bạn nên tra cứu trên trang dự báo thời tiết."
+
         return {
-            "answer": "Bạn có thể tìm chuyến bay trên các trang hàng không. Về thời tiết, bạn nên tra cứu trên trang dự báo thời tiết.",
+            "answer": answer,
             "tool_calls": [],
             "status": "success",
             "mode": "mock_baseline"
@@ -87,9 +107,24 @@ class ReActAgent:
             self.trace.append({"iteration": iteration, "thought": thought, "final_answer": final_answer})
             return final_answer, True
 
+        # 2. Câu hỏi chào hỏi / Smalltalk: Không cần gọi tool
+        greetings = ["hi", "hello", "chào", "bạn là ai", "alo", "helo", "hey"]
+        if any(g == user_lower.strip() or g in user_lower.split() for g in greetings) and not any(k in user_lower for k in ["bay", "vé", "thời tiết", "trang phục"]):
+            thought = "Người dùng đang chào hỏi hoặc bắt đầu hội thoại. Tôi sẽ gửi lời chào và giới thiệu năng lực hỗ trợ du lịch mà không dùng tool."
+            final_answer = "Xin chào! Tôi là Trợ lý AI Du lịch thông minh của Vingroup. Tôi có thể hỗ trợ bạn:\n- ✈️ Tra cứu chuyến bay nội địa (Hà Nội, TP.HCM, Đà Nẵng) theo ngân sách.\n- ☀️ Xem dự báo thời tiết và gợi ý trang phục tại điểm đến.\n- 📋 Giải đáp chính sách vé máy bay Vinpearl.\n\nBạn cần tôi hỗ trợ thông tin gì hôm nay?"
+            self.trace.append({"iteration": iteration, "thought": thought, "final_answer": final_answer})
+            return final_answer, True
+
         # Xác định các nhu cầu cần gọi tool
         needs_flight = any(k in user_lower for k in ["chuyến bay", "vé", "bay từ", "vé máy bay"])
         needs_weather = any(k in user_lower for k in ["thời tiết", "mặc gì", "nhiệt độ", "mưa"])
+
+        # 3. Nếu không liên quan đến chuyến bay hay thời tiết (ngoài phạm vi)
+        if not needs_flight and not needs_weather and iteration == 1:
+            thought = "Yêu cầu của người dùng nằm ngoài phạm vi tra cứu chuyến bay và thời tiết của tôi."
+            final_answer = "Tôi là Trợ lý Du lịch chuyên trách về chuyến bay và thời tiết của Vingroup. Hiện tại tôi chỉ có dữ liệu tra cứu các chặng bay nội địa (HAN, SGN, DAD) và thông tin thời tiết điểm đến. Bạn vui lòng đặt câu hỏi liên quan đến chuyến bay hoặc thời tiết nhé!"
+            self.trace.append({"iteration": iteration, "thought": thought, "final_answer": final_answer})
+            return final_answer, True
 
         # 2. Xử lý tra cứu chuyến bay ở iteration 1
         if needs_flight and iteration == 1:
